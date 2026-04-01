@@ -1,21 +1,36 @@
 import json
 import boto3
 import urllib.request
+from boto3.dynamodb.conditions import Key
 
-TOKEN = "8700438855:AAGVXRgzULdNiGEuoCbrB0mkWb1f4q8K9gQ"
+TOKEN = "can't paste"
 
 dynamodb = boto3.resource("dynamodb")
-table = dynamodb.Table("scholarships")
+
+scholarship_table = dynamodb.Table("scholarships")
+user_table = dynamodb.Table("user_profiles")
 
 
-def send_message(chat_id, text):
+# ---------- TELEGRAM MESSAGE ----------
+def send_message(chat_id, text, keyboard=None, remove=False):
 
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
-    data = json.dumps({
+    payload = {
         "chat_id": chat_id,
-        "text": text
-    }).encode("utf-8")
+        "text": text,
+        "disable_web_page_preview": True
+    }
+
+    if keyboard:
+        payload["reply_markup"] = json.dumps(keyboard)
+
+    if remove:
+        payload["reply_markup"] = json.dumps({
+            "remove_keyboard": True
+        })
+
+    data = json.dumps(payload).encode("utf-8")
 
     req = urllib.request.Request(
         url,
@@ -26,106 +41,213 @@ def send_message(chat_id, text):
     urllib.request.urlopen(req)
 
 
+# ---------- KEYBOARDS ----------
+
+def education_keyboard():
+    return {
+        "keyboard":[
+            ["Engineering","Diploma"],
+            ["ITI","Postgraduate"],
+            ["10th","12th"]
+        ],
+        "resize_keyboard":True,
+        "one_time_keyboard":True
+    }
+
+
+def category_keyboard():
+    return {
+        "keyboard":[
+            ["General","OBC"],
+            ["SC","ST"]
+        ],
+        "resize_keyboard":True,
+        "one_time_keyboard":True
+    }
+
+
+def income_keyboard():
+    return {
+        "keyboard":[
+            ["<1L", "1L-2L"],
+            ["2L-3L","3L-5L"],
+            [">5L"]
+        ],
+        "resize_keyboard":True,
+        "one_time_keyboard":True
+    }
+
+
+def confirm_keyboard():
+    return {
+        "keyboard":[
+            ["Yes","No"]
+        ],
+        "resize_keyboard":True,
+        "one_time_keyboard":True
+    }
+
+
+# ---------- MAIN HANDLER ----------
+
 def lambda_handler(event, context):
 
-    print("EVENT:", event)
-
     body = json.loads(event["body"])
+    message = body.get("message",{})
 
-    chat_id = body["message"]["chat"]["id"]
-    text = body["message"].get("text","").lower()
+    chat_id = str(message["chat"]["id"])
+    text = message.get("text","").strip()
 
-    print("User message:", text)
+    print("User:",chat_id,text)
 
-    # ------------------------------------------------
-    # Temporary user profile
-    # later this will come from Telegram conversation
-    # ------------------------------------------------
 
-    user_profile = {
+    # get user profile
+    response = user_table.get_item(
+        Key={"telegram_id":chat_id}
+    )
 
-        "education": "Undergraduate",
-        "category": "OBC",
-        "income": 200000,
-        "state": "Karnataka",
-        "gender": "Male"
+    user = response.get("Item",{})
 
-    }
 
-    # ------------------------------------------------
-    # Fetch scholarships
-    # ------------------------------------------------
+    # ---------- START ----------
 
-    response = table.scan()
+    if text == "/start":
 
-    scholarships = response.get("Items", [])
+        user_table.put_item(Item={
+            "telegram_id":chat_id,
+            "step":"name"
+        })
 
-    matches = []
+        send_message(chat_id,"👋 Welcome to Scholarship Finder Bot\n\nWhat is your name?")
 
-    for s in scholarships:
+        return {"statusCode":200}
 
-        income_limit = s.get("income_limit")
-        education_list = s.get("education", [])
-        category_list = s.get("category", [])
-        state_list = s.get("state", [])
-        gender_list = s.get("gender", [])
 
-        # Income check
-        if income_limit and user_profile["income"] > income_limit:
-            continue
+    # ---------- NAME ----------
 
-        # Education check
-        if education_list and user_profile["education"] not in education_list:
-            continue
+    if user.get("step") == "name":
 
-        # Category check
-        if category_list and "All" not in category_list and user_profile["category"] not in category_list:
-            continue
+        user["name"] = text
+        user["step"] = "education"
 
-        # State check
-        if state_list and "All India" not in state_list and user_profile["state"] not in state_list:
-            continue
+        user_table.put_item(Item=user)
 
-        # Gender check
-        if gender_list and "All" not in gender_list and user_profile["gender"] not in gender_list:
-            continue
+        send_message(chat_id,"Select your education level:",education_keyboard())
 
-        matches.append(s)
+        return {"statusCode":200}
 
-    # ------------------------------------------------
-    # Build Telegram reply
-    # ------------------------------------------------
 
-    if not matches:
+    # ---------- EDUCATION ----------
 
-        reply = "❌ No scholarships match your eligibility."
+    if user.get("step") == "education":
 
-    else:
+        user["education"] = text
+        user["step"] = "category"
 
-        reply = "🎓 Scholarships You Are Eligible For:\n\n"
+        user_table.put_item(Item=user)
 
-        for s in matches[:5]:
+        send_message(chat_id,"Select your category:",category_keyboard())
 
-            name = s.get("name","N/A")
-            amount_min = s.get("amount_min","")
-            amount_max = s.get("amount_max","")
-            deadline = s.get("deadline","Not specified")
-            link = s.get("application_link","")
+        return {"statusCode":200}
 
-            reply += f"🎓 {name}\n"
-            reply += f"💰 Amount: ₹{amount_min} - ₹{amount_max}\n"
 
-            if deadline:
-                reply += f"📅 Deadline: {deadline}\n"
+    # ---------- CATEGORY ----------
 
-            if link:
-                reply += f"🔗 Apply: {link}\n"
+    if user.get("step") == "category":
 
-            reply += "\n"
+        user["category"] = text
+        user["step"] = "income"
 
-    send_message(chat_id, reply)
+        user_table.put_item(Item=user)
 
-    return {
-        "statusCode": 200,
-        "body": "ok"
-    }
+        send_message(chat_id,"Select your family income:",income_keyboard())
+
+        return {"statusCode":200}
+
+
+    # ---------- INCOME ----------
+
+    if user.get("step") == "income":
+
+        user["income"] = text
+        user["step"] = "confirm"
+
+        user_table.put_item(Item=user)
+
+        profile = f"""
+📋 Your Profile
+
+👤 Name: {user['name']}
+🎓 Education: {user['education']}
+🏷 Category: {user['category']}
+💰 Income: {user['income']}
+
+Is this correct?
+"""
+
+        send_message(chat_id,profile,confirm_keyboard())
+
+        return {"statusCode":200}
+
+
+    # ---------- CONFIRM ----------
+
+    if user.get("step") == "confirm":
+
+        if text == "No":
+
+            user_table.put_item(Item={
+                "telegram_id":chat_id,
+                "step":"name"
+            })
+
+            send_message(chat_id,"Let's start again.\n\nWhat is your name?",remove=True)
+
+            return {"statusCode":200}
+
+
+        if text == "Yes":
+
+            education = user["education"]
+
+            response = scholarship_table.query(
+                IndexName="education-index",
+                KeyConditionExpression=Key("education_index").eq(education)
+            )
+
+            items = response.get("Items",[])
+
+            if not items:
+                reply="❌ No scholarships found."
+            else:
+
+                reply="🎓 Scholarships You Are Eligible For:\n\n"
+
+                for s in items[:5]:
+
+                    name=s.get("name","Scholarship")
+
+                    amount_min=s.get("amount_min")
+                    amount_max=s.get("amount_max")
+
+                    if amount_min and amount_max:
+                        amount=f"₹{amount_min} - ₹{amount_max}"
+                    else:
+                        amount="Not specified"
+
+                    deadline=s.get("deadline","Not specified")
+                    link=s.get("application_link","")
+
+                    reply+=f"""🎓 {name}
+💰 Amount: {amount}
+📅 Deadline: {deadline}
+🔗 Apply: {link}
+
+"""
+
+            send_message(chat_id,reply,remove=True)
+
+            return {"statusCode":200}
+
+
+    return {"statusCode":200}
